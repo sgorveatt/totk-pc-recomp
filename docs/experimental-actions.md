@@ -57,7 +57,8 @@ an installer against it. Use a new source folder and a new save/profile director
    ```
 
 3. Follow `docs/building.md` in that checkout for MSYS2 UCRT64 dependencies and the two
-   Python environments. Use the artifact's `msys2-packages.txt` and compiler version in
+   Python environments. Also install `mingw-w64-ucrt-x86_64-llvm-tools` for `llvm-ar.exe`.
+   Use the artifact's `msys2-packages.txt` and compiler version in
    `manifest.json` to match the build tools. This archive uses MSYS2's C++ runtime; do not
    mix it with an llvm-mingw release/installer toolchain. If exact package versions are no
    longer available, use a normal local runtime rebuild instead of assuming compatibility.
