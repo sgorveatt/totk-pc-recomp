@@ -1,0 +1,148 @@
+name: Experimental PR public components
+run-name: Public components for PR ${{ inputs.pr_number }} at ${{ inputs.expected_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Upstream PR number
+        required: true
+        default: '89'
+        type: string
+      expected_sha:
+        description: Reviewed full 40-character PR head commit
+        required: true
+        default: '195746a58a8051451c22e3e42757881e8e958f3c'
+        type: string
+  workflow_call:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+      expected_sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-pr-${{ inputs.pr_number }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.pr.outputs.sha }}
+    steps:
+      - uses: actions/github-script@v7
+        id: pr
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        with:
+          script: |
+            const n = process.env.PR_NUMBER;
+            const expected = process.env.EXPECTED_SHA;
+            if (!/^[1-9][0-9]*$/.test(n) || !/^[a-f0-9]{40}$/.test(expected)) {
+              throw new Error('Use a positive PR number and a full lowercase commit SHA');
+            }
+            const {data: pr} = await github.rest.pulls.get({
+              owner: 'valentderah', repo: 'totk-pc-recomp', pull_number: Number(n)
+            });
+            if (pr.head.sha !== expected) throw new Error('PR head changed; review the new commit before building');
+            core.setOutput('sha', expected);
+            await core.summary.addHeading('Public components only')
+              .addRaw(`PR: ${pr.html_url}\n\nSource: ${expected}\n\nNo game dump, keys, generated game code or game shader caches are accepted.\n`)
+              .write();
+  windows:
+    needs: resolve
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out build controller
+        uses: actions/checkout@v4
+        with:
+          path: controller
+          persist-credentials: false
+      - name: Check out exact upstream PR source
+        uses: actions/checkout@v4
+        with:
+          repository: valentderah/totk-pc-recomp
+          ref: ${{ needs.resolve.outputs.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: msys2/setup-msys2@v2
+        with:
+          location: 'C:\'
+          msystem: UCRT64
+          update: true
+          cache: false
+          install: >-
+            base-devel git make
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-lld
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-sdl3
+            mingw-w64-ucrt-x86_64-opus
+            mingw-w64-ucrt-x86_64-libvpx
+            mingw-w64-ucrt-x86_64-zstd
+            mingw-w64-ucrt-x86_64-vulkan-devel
+            mingw-w64-ucrt-x86_64-vulkan-memory-allocator
+            mingw-w64-ucrt-x86_64-shaderc
+            mingw-w64-ucrt-x86_64-spirv-tools
+      - name: Check public source and shader headers
+        working-directory: source
+        run: |
+          python tools/check_content.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/build_shaders.py --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build translator including the PR patches
+        working-directory: source
+        run: |
+          python tools/build_xlate.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tools/xlate_smoke.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build extraction tool without game inputs
+        working-directory: source
+        run: |
+          python tools/build_hactool.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compile and stage public runtime only
+        run: |
+          python controller/tools/ci_public_build.py build --source source --artifact public-components --jobs 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Record installed build packages
+        shell: msys2 {0}
+        run: pacman -Q > public-components/msys2-packages.txt
+      - name: Upload explicit public components
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-windows-pr-${{ inputs.pr_number }}-${{ needs.resolve.outputs.sha }}
+          path: public-components/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Report boundary
+        if: success()
+        run: |
+          @'
+          ### Windows public components built
+          Download the artifact and follow docs/experimental-actions.md in this fork.
+          The partial runtime archive, patched translator and hactool contain public code only.
+          Extraction, lifting, remaining compilation, linking and game/GPU tests remain local.
+          '@ >> $env:GITHUB_STEP_SUMMARY
+
